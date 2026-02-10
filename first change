@@ -1,1 +1,146 @@
-hi gokul 
+from flask import Flask, render_template, request, redirect, url_for, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask_jwt_extended import (
+    JWTManager, create_access_token,
+    jwt_required, get_jwt_identity
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+import random
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'supersecretkey'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'
+app.config['JWT_SECRET_KEY'] = 'jwt-secret-string'
+
+db = SQLAlchemy(app)
+jwt = JWTManager(app)
+
+# ==============================
+# Database Models
+# ==============================
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), unique=True)
+    password = db.Column(db.String(200))
+    tasks = db.relationship('Task', backref='owner', lazy=True)
+
+class Task(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200))
+    description = db.Column(db.Text)
+    completed = db.Column(db.Boolean, default=False)
+    priority = db.Column(db.String(50))
+    date_created = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+
+# ==============================
+# Routes
+# ==============================
+
+@app.route('/')
+def home():
+    return redirect(url_for('login_page'))
+
+@app.route('/login')
+def login_page():
+    return render_template("login.html")
+
+@app.route('/register')
+def register_page():
+    return render_template("register.html")
+
+@app.route('/dashboard')
+def dashboard_page():
+    return render_template("dashboard.html")
+
+# ==============================
+# Auth APIs
+# ==============================
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.json
+    hashed_pw = generate_password_hash(data['password'])
+    new_user = User(username=data['username'], password=hashed_pw)
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify({"msg": "User created"}), 201
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
+    user = User.query.filter_by(username=data['username']).first()
+
+    if user and check_password_hash(user.password, data['password']):
+        token = create_access_token(identity=user.id)
+        return jsonify(access_token=token)
+    
+    return jsonify({"msg": "Invalid credentials"}), 401
+
+# ==============================
+# Task APIs
+# ==============================
+
+@app.route('/api/tasks', methods=['GET'])
+@jwt_required()
+def get_tasks():
+    user_id = get_jwt_identity()
+    tasks = Task.query.filter_by(user_id=user_id).all()
+    return jsonify([{
+        "id": t.id,
+        "title": t.title,
+        "description": t.description,
+        "completed": t.completed,
+        "priority": t.priority
+    } for t in tasks])
+
+@app.route('/api/tasks', methods=['POST'])
+@jwt_required()
+def create_task():
+    user_id = get_jwt_identity()
+    data = request.json
+    task = Task(
+        title=data['title'],
+        description=data['description'],
+        priority=data['priority'],
+        user_id=user_id
+    )
+    db.session.add(task)
+    db.session.commit()
+    return jsonify({"msg": "Task created"})
+
+@app.route('/api/tasks/<int:id>', methods=['PUT'])
+@jwt_required()
+def update_task(id):
+    task = Task.query.get(id)
+    data = request.json
+    task.completed = data.get("completed", task.completed)
+    db.session.commit()
+    return jsonify({"msg": "Updated"})
+
+# ==============================
+# Analytics API
+# ==============================
+
+@app.route('/api/stats')
+@jwt_required()
+def stats():
+    user_id = get_jwt_identity()
+    tasks = Task.query.filter_by(user_id=user_id).all()
+    
+    completed = len([t for t in tasks if t.completed])
+    pending = len(tasks) - completed
+    
+    return jsonify({
+        "completed": completed,
+        "pending": pending
+    })
+
+# ==============================
+
+if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
